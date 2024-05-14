@@ -4,8 +4,9 @@
 #include <TFT_eSPI.h>
 #include <TFT_eFEX.h>
 #include <WiFi.h>
-#include <WiFiClient.h>
 #include <WebSocketsClient.h>
+#include "human_face_detect_msr01.hpp"
+#include "dl_tool.hpp"
 
 TFT_eSPI tft = TFT_eSPI();
 TFT_eFEX fex = TFT_eFEX(&tft);
@@ -19,22 +20,20 @@ const char *ssid = "Redmi Note 10 S";
 const char *password = "pusingskripsi";
 boolean isImageProcessing = true;
 
-void initWiFi(char *ssid, char *password);
 boolean initCamera(camera_config_t config);
+
+void initWiFi(char *ssid, char *password);
 void onWebsocketEvent(WStype_t type, uint8_t *payload, size_t length);
 
-void setup() {
-  Serial.begin(115200);
+HumanFaceDetectMSR01 humanFaceDetectMSR01(0.1f, 0.5f, 10, 0.2f);
 
-  initWiFi((char *)ssid, (char *)password);
+void setup() {
+  pinMode(33, OUTPUT);
+  Serial.begin(115200);
 
   tft.begin();
   tft.setRotation(0);  // 0 & 2 Portrait. 1 & 3 landscape
-  tft.fillScreen(TFT_BLACK);
-  tft.setCursor(25,55);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextSize(1);
-  tft.println(WiFi.localIP());
+  initWiFi((char *)ssid, (char *)password);
   delay(5000);
 
   // webSocket.setAuthorization("uwais", "uw415_4Lqarn1");
@@ -51,7 +50,6 @@ void setup() {
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi not connected");
     initWiFi((char *)ssid, (char *)password);
@@ -65,10 +63,40 @@ void loop() {
     return;
   }
 
+  // size_t out_len;
+  // int out_width, out_height;
+  // uint8_t *out_buf;
+
+  // out_len = fb->width * fb->height * 3;
+  // out_width = fb->width;
+  // out_height = fb->height;
+  // out_buf = (uint8_t *)malloc(out_len);
+
+  // std::list<dl::detect::result_t> &results = humanFaceDetectMSR01.infer((uint8_t *)fb->buf, {(int)fb->width, (int)fb->height, 3});
+  // Serial.println(results.size());
+
+  // if (!out_buf) {
+  //     log_e("out_buf malloc failed");
+  //   }
+
+
+  // std::list<dl::detect::result_t> &results = humanFaceDetectMSR01.infer((uint8_t *)out_buf, {(int)out_height, (int)out_width, 3});
+  
+  // if (results.size() > 0) {
+  //   Serial.println("Face detected" + results.size());
+  // }
+
+  // free(out_buf);
+
+  // for (std::list<dl::detect::result_t>::iterator prediction = results.begin(); prediction != results.end(); prediction++) {
+  //   Serial.printf("Prediction: Score { %f }, box [ %f, %f, %f, %f ]\n", prediction->score, prediction->box[0], prediction->box[1], prediction->box[2], prediction->box[3]);
+  // }
+
   // sending image to websocket
   if (webSocket.isConnected() && !isImageProcessing) {
     webSocket.sendBIN((uint8_t *)fb->buf, fb->len);
     isImageProcessing = true;
+    digitalWrite(33, HIGH);
     Serial.println("image sent to server through websocket");
   }
 
@@ -89,7 +117,6 @@ void initWiFi(char *ssid, char *password) {
 }
 
 boolean initCamera(camera_config_t config) {
-
   // Configure GPIO pin assignments for camera interface
   config.pin_pwdn = -1;     // Power-down pin (not used)
   config.pin_reset = -1;    // Reset pin (not used)
@@ -111,10 +138,11 @@ boolean initCamera(camera_config_t config) {
 
   config.xclk_freq_hz = 20000000; // External clock frequency (20 MHz)
   config.pixel_format = PIXFORMAT_JPEG; // Pixel format (JPEG)
+  // config.pixel_format = PIXFORMAT_RGB565; // Pixel format (JPEG)
 
-  config.frame_size = FRAMESIZE_QCIF;
-  config.jpeg_quality = 10;
-  config.fb_count = 2;
+  config.frame_size = FRAMESIZE_240X240;
+  config.jpeg_quality = 12;
+  config.fb_count = 1;
   config.fb_location = CAMERA_FB_IN_PSRAM; // Frame buffer location
 
   // Initialize camera with the configured parameters
@@ -126,7 +154,7 @@ boolean initCamera(camera_config_t config) {
   }
 
   sensor_t * s = esp_camera_sensor_get();
-  s->set_framesize(s, FRAMESIZE_QCIF);
+  s->set_framesize(s, FRAMESIZE_240X240);
 
   return true;
 }
@@ -148,7 +176,10 @@ void onWebsocketEvent(WStype_t type, uint8_t *payload, size_t length) {
     case WStype_TEXT:
       message = String((char *)payload);
       if (message.equals("IMAGE_PROCESSED")) {
+        Serial.println("Image processed");
         isImageProcessing = false;
+        digitalWrite(33, LOW);
+        // delay(5000);
       }
       break;
     default:
