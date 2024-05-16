@@ -6,6 +6,7 @@
 #include <WiFi.h>
 #include <WebSocketsClient.h>
 #include "human_face_detect_msr01.hpp"
+#include "human_face_detect_mnp01.hpp"
 #include "dl_tool.hpp"
 
 TFT_eSPI tft = TFT_eSPI();
@@ -16,16 +17,20 @@ camera_config_t cameraConfig;
 
 WebSocketsClient webSocket;
 
-const char *ssid = "Redmi Note 10 S";
-const char *password = "pusingskripsi";
-boolean isImageProcessing = true;
+const char *ssid = "KOS 54 ATAS";
+const char *password = "almaira24";
+boolean isImageOnProcessing = true;
+
+esp_err_t res;
 
 boolean initCamera(camera_config_t config);
 
 void initWiFi(char *ssid, char *password);
 void onWebsocketEvent(WStype_t type, uint8_t *payload, size_t length);
+void printTextTft(String text);
 
-HumanFaceDetectMSR01 humanFaceDetectMSR01(0.1f, 0.5f, 10, 0.2f);
+HumanFaceDetectMSR01 s1(0.1F, 0.5F, 10, 0.2F);
+HumanFaceDetectMNP01 s2(0.5F, 0.3F, 5);
 
 void setup() {
   pinMode(33, OUTPUT);
@@ -33,15 +38,20 @@ void setup() {
 
   tft.begin();
   tft.setRotation(0);  // 0 & 2 Portrait. 1 & 3 landscape
+
+  // printTextTft("Connecting to the network");
   initWiFi((char *)ssid, (char *)password);
+  // printTextTft("Connected with ip addr " + WiFi.localIP());
   delay(5000);
 
-  // webSocket.setAuthorization("uwais", "uw415_4Lqarn1");
+  // printTextTft("Trying to make connection to the server");
   webSocket.begin("20.6.129.71", 5096);
   webSocket.onEvent(onWebsocketEvent);
   webSocket.setReconnectInterval(5000);
 
-  Serial.println(webSocket.isConnected());
+  if (webSocket.isConnected()) {
+    // printTextTft("Connected to the server");
+  }
 
   if (!initCamera(cameraConfig)) {
     Serial.println("Restarting esp....");
@@ -50,60 +60,110 @@ void setup() {
 }
 
 void loop() {
+  // Serial.println("entering loop");
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi not connected");
     initWiFi((char *)ssid, (char *)password);
   }
-
+  res = ESP_OK;
   fb = NULL;
   fb = esp_camera_fb_get();
+
+  size_t out_len;
+  int out_width, out_height;
+  uint8_t *out_buf;
+  size_t _jpg_buf_len;
+  uint8_t *_jpg_buf;
+  bool converted, faceDetected = false;
 
   if (!fb) {
     Serial.println("Camera capture failed");
     return;
   }
 
-  // size_t out_len;
-  // int out_width, out_height;
-  // uint8_t *out_buf;
+  fex.drawJpg((uint8_t *)fb->buf, fb->len, 0, 0);
 
-  // out_len = fb->width * fb->height * 3;
-  // out_width = fb->width;
-  // out_height = fb->height;
-  // out_buf = (uint8_t *)malloc(out_len);
+  _jpg_buf_len = fb->len;
+  _jpg_buf = fb->buf;
 
-  // std::list<dl::detect::result_t> &results = humanFaceDetectMSR01.infer((uint8_t *)fb->buf, {(int)fb->width, (int)fb->height, 3});
-  // Serial.println(results.size());
-
-  // if (!out_buf) {
-  //     log_e("out_buf malloc failed");
-  //   }
-
-
-  // std::list<dl::detect::result_t> &results = humanFaceDetectMSR01.infer((uint8_t *)out_buf, {(int)out_height, (int)out_width, 3});
+  out_len = fb->width * fb->height * 3;
+  out_width = fb->width;
+  out_height = fb->height;
+  out_buf = (uint8_t *)malloc(out_len);
   
-  // if (results.size() > 0) {
-  //   Serial.println("Face detected" + results.size());
-  // }
+  if (!out_buf) {
+    Serial.println("out_buf malloc failed");
+    free(out_buf);
+    res = ESP_FAIL;
+  } else {
+    converted = fmt2rgb888(fb->buf, fb->len, fb->format, out_buf);
+    // Serial.println("rgb88 finished");
+    esp_camera_fb_return(fb);
+    fb = NULL;
 
-  // free(out_buf);
+    if (!converted) {
+      log_e("fmt2rgb888 failed");
+      free(out_buf);
+      res = ESP_FAIL;
+    } else {
+      std::list<dl::detect::result_t> &candidates = s1.infer((uint8_t *)out_buf, {(int)out_height, (int)out_width, 3});
+      std::list<dl::detect::result_t> &results = s2.infer((uint8_t *)out_buf, {(int)out_height, (int)out_width, 3}, candidates);
+      if (results.size() > 0) {
+        Serial.println("Face detected");
+        faceDetected = true;
+        int i = 0;
+        for (std::list<dl::detect::result_t>::iterator prediction = results.begin(); prediction != results.end(); prediction++, i++)
+        {
+          printf("[%d] score: %f, box: [%d, %d, %d, %d]\n", i, prediction->score, prediction->box[0], prediction->box[1], prediction->box[2], prediction->box[3]);
+          fex.drawRect(prediction->box[0], prediction->box[1], prediction->box[2] - (240 - 120) + prediction->box[0], prediction->box[3] - (240 - 160) + prediction->box[1], TFT_GREEN);
+        }
+      }
+      
 
-  // for (std::list<dl::detect::result_t>::iterator prediction = results.begin(); prediction != results.end(); prediction++) {
-  //   Serial.printf("Prediction: Score { %f }, box [ %f, %f, %f, %f ]\n", prediction->score, prediction->box[0], prediction->box[1], prediction->box[2], prediction->box[3]);
-  // }
+      converted = fmt2jpg(out_buf, out_len, out_width, out_height, PIXFORMAT_RGB888, 100, &_jpg_buf, &_jpg_buf_len);
+      free(out_buf);
+      if (!converted) {
+        log_e("fmt2jpg failed");
+        res = ESP_FAIL;
+      }
 
-  // sending image to websocket
-  if (webSocket.isConnected() && !isImageProcessing) {
-    webSocket.sendBIN((uint8_t *)fb->buf, fb->len);
-    isImageProcessing = true;
-    digitalWrite(33, HIGH);
-    Serial.println("image sent to server through websocket");
+    }
+
+    if (res == ESP_OK && !isImageOnProcessing) {
+      if (webSocket.isConnected() && faceDetected) {
+        webSocket.sendBIN((uint8_t *)_jpg_buf, _jpg_buf_len);
+        isImageOnProcessing = true;
+        Serial.println("image sent to server through webserver");
+      }
+    }
+
+
+    if (fb)
+    {
+      esp_camera_fb_return(fb);
+      fb = NULL;
+      _jpg_buf = NULL;
+    }
+    else if (_jpg_buf)
+    {
+      free(_jpg_buf);
+      _jpg_buf = NULL;
+    }
+    else
+    {
+      log_e("Send frame failed");
+    }
   }
 
-  fex.drawJpg((uint8_t *)fb->buf, fb->len, 0, 0);
-  esp_camera_fb_return(fb);
-
   webSocket.loop();
+}
+
+void printTextTft(String text) {
+  tft.fillScreen(TFT_BLACK);
+  tft.setCursor(25,55);
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextSize(1);
+  tft.println(text);
 }
 
 void initWiFi(char *ssid, char *password) {
@@ -141,8 +201,8 @@ boolean initCamera(camera_config_t config) {
   // config.pixel_format = PIXFORMAT_RGB565; // Pixel format (JPEG)
 
   config.frame_size = FRAMESIZE_240X240;
-  config.jpeg_quality = 12;
-  config.fb_count = 1;
+  config.jpeg_quality = 6;
+  config.fb_count = 2;
   config.fb_location = CAMERA_FB_IN_PSRAM; // Frame buffer location
 
   // Initialize camera with the configured parameters
@@ -177,7 +237,7 @@ void onWebsocketEvent(WStype_t type, uint8_t *payload, size_t length) {
       message = String((char *)payload);
       if (message.equals("IMAGE_PROCESSED")) {
         Serial.println("Image processed");
-        isImageProcessing = false;
+        isImageOnProcessing = false;
         digitalWrite(33, LOW);
         // delay(5000);
       }
@@ -186,3 +246,4 @@ void onWebsocketEvent(WStype_t type, uint8_t *payload, size_t length) {
       break;
   }
 }
+
