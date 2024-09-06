@@ -8,6 +8,12 @@
 #include "human_face_detect_msr01.hpp"
 #include "human_face_detect_mnp01.hpp"
 #include "dl_tool.hpp"
+#include <ArduinoJson.h>
+#include <base64.h>
+
+#define TWO_STAGE 1
+#define RELAY_PIN 0
+#define PUSH_BUTTON_PIN 33
 
 TFT_eSPI tft = TFT_eSPI();
 TFT_eFEX fex = TFT_eFEX(&tft);
@@ -17,9 +23,13 @@ camera_config_t cameraConfig;
 
 WebSocketsClient webSocket;
 
-const char *ssid = "KOS 54 ATAS";
-const char *password = "almaira24";
-boolean isImageOnProcessing = true;
+const char *ssid = "Redmi Note 10 S";
+const char *password = "pusingskripsi";
+const char *extraheaders;
+boolean isImageOnProcessing = false;
+boolean isRegisteringFace = false;
+String userId;
+JsonDocument doc;
 
 esp_err_t res;
 
@@ -27,30 +37,42 @@ boolean initCamera(camera_config_t config);
 
 void initWiFi(char *ssid, char *password);
 void onWebsocketEvent(WStype_t type, uint8_t *payload, size_t length);
-void printTextTft(String text);
+void printTextTft(const char* text);
 
-HumanFaceDetectMSR01 s1(0.1F, 0.5F, 10, 0.2F);
-HumanFaceDetectMNP01 s2(0.5F, 0.3F, 5);
+#if TWO_STAGE
+    HumanFaceDetectMSR01 s1(0.1F, 0.5F, 10, 0.2F);
+    HumanFaceDetectMNP01 s2(0.5F, 0.3F, 5);
+#else // ONE_STAGE
+    HumanFaceDetectMSR01 s1(0.1F, 0.5F, 10, 0.2F);
+#endif
 
 void setup() {
-  pinMode(33, OUTPUT);
-  Serial.begin(115200);
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(PUSH_BUTTON_PIN, INPUT);
+  Serial.begin(115200);  
 
   tft.begin();
   tft.setRotation(0);  // 0 & 2 Portrait. 1 & 3 landscape
 
-  // printTextTft("Connecting to the network");
+  printTextTft("Connecting to the network");
   initWiFi((char *)ssid, (char *)password);
-  // printTextTft("Connected with ip addr " + WiFi.localIP());
+  printTextTft("Connected to the network");
+  Serial.println("mac address: " + WiFi.macAddress());
   delay(5000);
 
-  // printTextTft("Trying to make connection to the server");
-  webSocket.begin("20.6.129.71", 5096);
+  String headersTemp = "x-esp32-id:" + WiFi.macAddress();
+  extraheaders = headersTemp.c_str();
+  
+
+  webSocket.begin("103.27.206.187", 8081);
+  webSocket.setExtraHeaders(extraheaders);
   webSocket.onEvent(onWebsocketEvent);
   webSocket.setReconnectInterval(5000);
 
   if (webSocket.isConnected()) {
-    // printTextTft("Connected to the server");
+    Serial.println("Connected to the ws server");
+    printTextTft("Connected to the ws server");
+    delay(1000);
   }
 
   if (!initCamera(cameraConfig)) {
@@ -60,7 +82,13 @@ void setup() {
 }
 
 void loop() {
-  // Serial.println("entering loop");
+  if (digitalRead(PUSH_BUTTON_PIN) == HIGH) {
+    Serial.println("Button pressed");
+    digitalWrite(RELAY_PIN, HIGH);
+    delay(2000);
+    digitalWrite(RELAY_PIN, LOW);
+  }
+
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi not connected");
     initWiFi((char *)ssid, (char *)password);
@@ -81,7 +109,27 @@ void loop() {
     return;
   }
 
-  fex.drawJpg((uint8_t *)fb->buf, fb->len, 0, 0);
+  int tftWidth = tft.width();
+  int tftHeight = tft.height();
+  int imgWidth = fb->width;
+  int imgHeight = fb->height;
+
+  // Calculate offsets to center the image
+  int xOffset = (tftWidth - imgWidth) / 2;
+  int yOffset = (tftHeight - imgHeight) / 2;
+
+  // Ensure offsets are within bounds
+  if (xOffset < 0) xOffset = 0;
+  if (yOffset < 0) yOffset = 0;
+
+  // Ensure image dimensions do not exceed the display dimensions
+  if (imgWidth > tftWidth) imgWidth = tftWidth;
+  if (imgHeight > tftHeight) imgHeight = tftHeight;
+
+  // Display the image with the calculated offsets
+  fex.drawJpg((uint8_t *)fb->buf, fb->len, xOffset, yOffset, imgWidth, imgHeight);
+  
+  // fex.drawJpg((uint8_t *)fb->buf, fb->len, 0, 0);
 
   _jpg_buf_len = fb->len;
   _jpg_buf = fb->buf;
@@ -97,7 +145,6 @@ void loop() {
     res = ESP_FAIL;
   } else {
     converted = fmt2rgb888(fb->buf, fb->len, fb->format, out_buf);
-    // Serial.println("rgb88 finished");
     esp_camera_fb_return(fb);
     fb = NULL;
 
@@ -106,20 +153,33 @@ void loop() {
       free(out_buf);
       res = ESP_FAIL;
     } else {
-      std::list<dl::detect::result_t> &candidates = s1.infer((uint8_t *)out_buf, {(int)out_height, (int)out_width, 3});
-      std::list<dl::detect::result_t> &results = s2.infer((uint8_t *)out_buf, {(int)out_height, (int)out_width, 3}, candidates);
+      #if TWO_STAGE
+        std::list<dl::detect::result_t> &candidates = s1.infer((uint8_t *)out_buf, {(int)out_height, (int)out_width, 3});
+        std::list<dl::detect::result_t> &results = s2.infer((uint8_t *)out_buf, {(int)out_height, (int)out_width, 3}, candidates);
+      #else
+        std::list<dl::detect::result_t> &results = s1.infer((uint8_t *)out_buf, {(int)out_height, (int)out_width, 3});
+      #endif
+      
       if (results.size() > 0) {
         Serial.println("Face detected");
         faceDetected = true;
-        int i = 0;
-        for (std::list<dl::detect::result_t>::iterator prediction = results.begin(); prediction != results.end(); prediction++, i++)
-        {
-          printf("[%d] score: %f, box: [%d, %d, %d, %d]\n", i, prediction->score, prediction->box[0], prediction->box[1], prediction->box[2], prediction->box[3]);
-          fex.drawRect(prediction->box[0], prediction->box[1], prediction->box[2] - (240 - 120) + prediction->box[0], prediction->box[3] - (240 - 160) + prediction->box[1], TFT_GREEN);
-        }
-      }
-      
 
+        dl::detect::result_t prediction = results.front();
+
+        printf("score: %f, box: [%d, %d, %d, %d]\n", prediction.score, prediction.box[0], prediction.box[1], prediction.box[2], prediction.box[3]);
+
+        int x = prediction.box[0];
+        int y = prediction.box[1];
+        int width = prediction.box[2];
+        int height = prediction.box[3];
+
+        if (x < 0) x = 0;
+        if (y < 0) y = 0;
+        if (x + width > 128) width = 128 - x - 10;
+        if (y + height > 160) height = 160 - y - 10;
+
+        fex.drawRect(x, y, width, height, TFT_GREEN);
+      }
       converted = fmt2jpg(out_buf, out_len, out_width, out_height, PIXFORMAT_RGB888, 100, &_jpg_buf, &_jpg_buf_len);
       free(out_buf);
       if (!converted) {
@@ -131,9 +191,23 @@ void loop() {
 
     if (res == ESP_OK && !isImageOnProcessing) {
       if (webSocket.isConnected() && faceDetected) {
-        webSocket.sendBIN((uint8_t *)_jpg_buf, _jpg_buf_len);
-        isImageOnProcessing = true;
-        Serial.println("image sent to server through webserver");
+        if (isRegisteringFace) {
+          JsonDocument doc;
+          doc["destination"] = userId;
+          doc["image"] = base64::encode(_jpg_buf, _jpg_buf_len);
+
+          String JsonString;
+          serializeJson(doc, JsonString);
+
+          webSocket.sendTXT(JsonString);
+          isRegisteringFace = false;
+          userId = "";
+          Serial.println("image sent to server through webserver for registering face");
+        } else {
+          webSocket.sendBIN((uint8_t *)_jpg_buf, _jpg_buf_len);
+          isImageOnProcessing = true;
+          Serial.println("image sent to server through webserver");
+        }
       }
     }
 
@@ -158,7 +232,7 @@ void loop() {
   webSocket.loop();
 }
 
-void printTextTft(String text) {
+void printTextTft(const char* text) {
   tft.fillScreen(TFT_BLACK);
   tft.setCursor(25,55);
   tft.setTextColor(TFT_WHITE);
@@ -200,7 +274,7 @@ boolean initCamera(camera_config_t config) {
   config.pixel_format = PIXFORMAT_JPEG; // Pixel format (JPEG)
   // config.pixel_format = PIXFORMAT_RGB565; // Pixel format (JPEG)
 
-  config.frame_size = FRAMESIZE_240X240;
+  config.frame_size = FRAMESIZE_HQVGA;
   config.jpeg_quality = 6;
   config.fb_count = 2;
   config.fb_location = CAMERA_FB_IN_PSRAM; // Frame buffer location
@@ -214,32 +288,45 @@ boolean initCamera(camera_config_t config) {
   }
 
   sensor_t * s = esp_camera_sensor_get();
-  s->set_framesize(s, FRAMESIZE_240X240);
+  s->set_framesize(s, FRAMESIZE_HQVGA);
+  s->set_hmirror(s, 1);
 
   return true;
 }
 
 void onWebsocketEvent(WStype_t type, uint8_t *payload, size_t length) {
-  String message;
-
   switch (type) {
     case WStype_DISCONNECTED:
       Serial.print("WS Disconnected");
       break;
     case WStype_CONNECTED:
       Serial.print("WS Connected");
-      webSocket.sendTXT("Hello from ESP32");
       break;
     case WStype_ERROR:
       Serial.print("WS Error");
       break;
     case WStype_TEXT:
-      message = String((char *)payload);
-      if (message.equals("IMAGE_PROCESSED")) {
-        Serial.println("Image processed");
+      deserializeJson(doc, payload);
+
+      if (doc["message"].as<String>() == "capture")
+      {
+        userId = doc["user_id"].as<String>();
+      } else {
+        Serial.println(doc["message"].as<String>());
+        Serial.println(doc["open"].as<String>());
+        printTextTft(doc["message"].as<String>().c_str());
+        delay(1000);
+
+        if (doc["open"].as<boolean>()) {
+          Serial.println("open");
+          digitalWrite(RELAY_PIN, HIGH);
+          delay(2000);
+          digitalWrite(RELAY_PIN, LOW);
+        } else {
+          Serial.println("close");
+          digitalWrite(RELAY_PIN, LOW);
+        }
         isImageOnProcessing = false;
-        digitalWrite(33, LOW);
-        // delay(5000);
       }
       break;
     default:
