@@ -1,3 +1,4 @@
+#include <FS.h>
 #include <Arduino.h>
 #include "esp_camera.h"
 #include <SPI.h>
@@ -10,9 +11,11 @@
 #include "dl_tool.hpp"
 #include <ArduinoJson.h>
 #include <base64.h>
+#include <WiFiManager.h>
 
 #define TWO_STAGE 1
-#define RELAY_PIN 0
+#define BACKWARD_MOTOR_PIN 0
+#define FORWARD_MOTOR_PIN 2
 #define PUSH_BUTTON_PIN 33
 
 TFT_eSPI tft = TFT_eSPI();
@@ -22,9 +25,8 @@ camera_fb_t *fb = NULL;
 camera_config_t cameraConfig;
 
 WebSocketsClient webSocket;
+WiFiManager wifiManager;
 
-const char *ssid = "Redmi Note 10 S";
-const char *password = "pusingskripsi";
 const char *extraheaders;
 boolean isImageOnProcessing = false;
 boolean isRegisteringFace = false;
@@ -35,7 +37,7 @@ esp_err_t res;
 
 boolean initCamera(camera_config_t config);
 
-void initWiFi(char *ssid, char *password);
+void initWiFi();
 void onWebsocketEvent(WStype_t type, uint8_t *payload, size_t length);
 void printTextTft(const char* text);
 
@@ -47,7 +49,10 @@ void printTextTft(const char* text);
 #endif
 
 void setup() {
-  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(BACKWARD_MOTOR_PIN, OUTPUT);
+  pinMode(FORWARD_MOTOR_PIN, OUTPUT);
+  digitalWrite(FORWARD_MOTOR_PIN, LOW);
+  digitalWrite(BACKWARD_MOTOR_PIN, LOW);
   pinMode(PUSH_BUTTON_PIN, INPUT);
   Serial.begin(115200);  
 
@@ -55,7 +60,7 @@ void setup() {
   tft.setRotation(0);  // 0 & 2 Portrait. 1 & 3 landscape
 
   printTextTft("Connecting to the network");
-  initWiFi((char *)ssid, (char *)password);
+  initWiFi();
   printTextTft("Connected to the network");
   Serial.println("mac address: " + WiFi.macAddress());
   delay(5000);
@@ -64,16 +69,16 @@ void setup() {
   extraheaders = headersTemp.c_str();
   
 
-  webSocket.begin("103.27.206.187", 8081);
-  webSocket.setExtraHeaders(extraheaders);
-  webSocket.onEvent(onWebsocketEvent);
-  webSocket.setReconnectInterval(5000);
+  // webSocket.begin("103.27.206.187", 8081);
+  // webSocket.setExtraHeaders(extraheaders);
+  // webSocket.onEvent(onWebsocketEvent);
+  // webSocket.setReconnectInterval(5000);
 
-  if (webSocket.isConnected()) {
-    Serial.println("Connected to the ws server");
-    printTextTft("Connected to the ws server");
-    delay(1000);
-  }
+  // if (webSocket.isConnected()) {
+  //   Serial.println("Connected to the ws server");
+  //   printTextTft("Connected to the ws server");
+  //   delay(1000);
+  // }
 
   if (!initCamera(cameraConfig)) {
     Serial.println("Restarting esp....");
@@ -82,17 +87,32 @@ void setup() {
 }
 
 void loop() {
-  if (digitalRead(PUSH_BUTTON_PIN) == HIGH) {
+  int buttonState = digitalRead(PUSH_BUTTON_PIN);
+  Serial.println(buttonState);
+  if (buttonState == HIGH) {
     Serial.println("Button pressed");
-    digitalWrite(RELAY_PIN, HIGH);
+    digitalWrite(BACKWARD_MOTOR_PIN, HIGH);
+    digitalWrite(FORWARD_MOTOR_PIN, LOW);
+    delay(300);
+    digitalWrite(BACKWARD_MOTOR_PIN, LOW);
+    digitalWrite(FORWARD_MOTOR_PIN, LOW);
     delay(2000);
-    digitalWrite(RELAY_PIN, LOW);
-  }
+    digitalWrite(BACKWARD_MOTOR_PIN, LOW);
+    digitalWrite(FORWARD_MOTOR_PIN, HIGH);
+    delay(300);
+    digitalWrite(FORWARD_MOTOR_PIN, LOW);
+    digitalWrite(BACKWARD_MOTOR_PIN, LOW);
+    // delay(2000);
+  } 
+  // else {
+  //   digitalWrite(BACKWARD_MOTOR_PIN, LOW);
+  // }
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi not connected");
-    initWiFi((char *)ssid, (char *)password);
+    initWiFi();
   }
+
   res = ESP_OK;
   fb = NULL;
   fb = esp_camera_fb_get();
@@ -190,25 +210,25 @@ void loop() {
     }
 
     if (res == ESP_OK && !isImageOnProcessing) {
-      if (webSocket.isConnected() && faceDetected) {
-        if (isRegisteringFace) {
-          JsonDocument doc;
-          doc["destination"] = userId;
-          doc["image"] = base64::encode(_jpg_buf, _jpg_buf_len);
+      // if (webSocket.isConnected() && faceDetected) {
+      //   if (isRegisteringFace) {
+      //     JsonDocument doc;
+      //     doc["destination"] = userId;
+      //     doc["image"] = base64::encode(_jpg_buf, _jpg_buf_len);
 
-          String JsonString;
-          serializeJson(doc, JsonString);
+      //     String JsonString;
+      //     serializeJson(doc, JsonString);
 
-          webSocket.sendTXT(JsonString);
-          isRegisteringFace = false;
-          userId = "";
-          Serial.println("image sent to server through webserver for registering face");
-        } else {
-          webSocket.sendBIN((uint8_t *)_jpg_buf, _jpg_buf_len);
-          isImageOnProcessing = true;
-          Serial.println("image sent to server through webserver");
-        }
-      }
+      //     webSocket.sendTXT(JsonString);
+      //     isRegisteringFace = false;
+      //     userId = "";
+      //     Serial.println("image sent to server through webserver for registering face");
+      //   } else {
+      //     webSocket.sendBIN((uint8_t *)_jpg_buf, _jpg_buf_len);
+      //     isImageOnProcessing = true;
+      //     Serial.println("image sent to server through webserver");
+      //   }
+      // }
     }
 
 
@@ -229,7 +249,7 @@ void loop() {
     }
   }
 
-  webSocket.loop();
+  // webSocket.loop();
 }
 
 void printTextTft(const char* text) {
@@ -240,14 +260,22 @@ void printTextTft(const char* text) {
   tft.println(text);
 }
 
-void initWiFi(char *ssid, char *password) {
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting to Wi-Fi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.print(".");
+void initWiFi() {
+  WiFi.mode(WIFI_STA);
+
+  // wifiManager.resetSettings();
+  wifiManager.setConfigPortalTimeout(180); 
+  wifiManager.setConnectTimeout(30);
+
+  if (!wifiManager.autoConnect("SmartDoor AP")) {
+    Serial.println("Failed to connect and hit timeout");
+    delay(3000);
+    ESP.restart();
+    delay(5000);
   }
-  Serial.printf("\nConnected to WiFi\n");
+ 
+  Serial.println("Connected to the WiFi network");
+  Serial.println(WiFi.localIP());
 }
 
 boolean initCamera(camera_config_t config) {
@@ -319,12 +347,12 @@ void onWebsocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 
         if (doc["open"].as<boolean>()) {
           Serial.println("open");
-          digitalWrite(RELAY_PIN, HIGH);
+          // digitalWrite(BACKWARD_MOTOR_PIN, HIGH);
           delay(2000);
-          digitalWrite(RELAY_PIN, LOW);
+          // digitalWrite(BACKWARD_MOTOR_PIN, LOW);
         } else {
           Serial.println("close");
-          digitalWrite(RELAY_PIN, LOW);
+          // digitalWrite(RELAY_PIN, LOW);
         }
         isImageOnProcessing = false;
       }
